@@ -41,6 +41,10 @@ PodLens is an AI-powered context generator for podcasts. It listens to audio, tr
 - **FFmpeg** (Required by Whisper for audio processing)
 
 ### 1. Clone the repository
+```bash
+git clone https://github.com/dhruvpathak1/PodLens_AI_Context_Generator/tree/main
+cd PodLens_AI_Context_Generator
+```
 
 ### 2. Frontend Setup
 ```bash
