@@ -728,6 +728,12 @@
   border-color: rgba(56, 189, 248, 0.35);
 }
 
+.entity-source-card__badge[data-entity-type='MISC'] {
+  background: rgba(20, 184, 166, 0.12);
+  color: #2dd4bf;
+  border-color: rgba(20, 184, 166, 0.35);
+}
+
 .entity-source-card__time {
   font-size: 0.65rem;
   font-family: var(--mono);
@@ -1153,6 +1159,10 @@
 
 .live-workspace__tag[data-entity-type='EVENT'] .live-workspace__tag-type {
   color: var(--status-blue);
+}
+
+.live-workspace__tag[data-entity-type='MISC'] .live-workspace__tag-type {
+  color: #2dd4bf;
 }
 
 .live-workspace__tag-text {

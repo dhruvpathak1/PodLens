@@ -24,6 +24,7 @@ const ENTITY_TYPE_FILTER_OPTIONS = [
   'TECHNOLOGY',
   'EVENT',
   'COMPANY',
+  'MISC',
 ] as const
 
 type EntityTypeFilterOption = (typeof ENTITY_TYPE_FILTER_OPTIONS)[number]
@@ -118,6 +119,7 @@ export default function App() {
       TECHNOLOGY: byType.get('TECHNOLOGY') ?? 0,
       EVENT: byType.get('EVENT') ?? 0,
       COMPANY: byType.get('COMPANY') ?? 0,
+      MISC: byType.get('MISC') ?? 0,
     }
     return counts
   }, [entityDoc])

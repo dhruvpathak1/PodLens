@@ -1,4 +1,4 @@
-"""Entity extraction from timestamped transcript chunks (spaCy or Claude)."""
+"""Entity extraction from timestamped transcript chunks (spaCy or Claude classic NER)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 logger = logging.getLogger(__name__)
 
-# --- Allowed output types (user-facing) ---
-ENTITY_TYPES = frozenset({"PLACE", "PERSON", "TECHNOLOGY", "EVENT", "COMPANY"})
+# Repo root (parent of server/). Ensures .env loads even if the process cwd differs.
+_ENTITY_ENV_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_ENTITY_ENV_ROOT / ".env", encoding="utf-8-sig")
+
+# --- Allowed output types (user-facing). MISC = classic CoNLL miscellaneous (non PER/ORG/LOC). ---
+ENTITY_TYPES = frozenset(
+    {"PLACE", "PERSON", "TECHNOLOGY", "EVENT", "COMPANY", "MISC"}
+)
+
+
+def resolve_entity_backend(explicit: str | None = None) -> str:
+    """Prefer explicit (API / form), then ENTITY_BACKEND env, then Claude if key is set, else spaCy."""
+    if explicit and str(explicit).strip():
+        b = str(explicit).strip().lower()
+    else:
+        env = os.environ.get("ENTITY_BACKEND", "").strip().lower()
+        if env in ("spacy", "claude"):
+            b = env
+        elif os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            b = "claude"
+        else:
+            b = "spacy"
+    if b not in ("spacy", "claude"):
+        b = "spacy"
+    return b
 
 # Filler / disfluency phrases (removed before NER)
 _FILLER_PATTERN = re.compile(
@@ -249,6 +274,7 @@ _SPACY_MAP: dict[str, str] = {
     "WORK_OF_ART": "EVENT",
     "LANGUAGE": "TECHNOLOGY",  # spoken languages, stacks mentioned as languages
     "LAW": "EVENT",  # named laws, cases — often discussed like events in podcasts
+    "NORP": "MISC",  # nationalities, religions, political groups (CoNLL-style misc)
 }
 
 
@@ -285,32 +311,75 @@ def extract_with_spacy(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return entities
 
 
-# --- Claude ---
-_CLAUDE_SYSTEM = """You extract named entities from podcast transcript chunks.
-Return ONLY valid JSON (no markdown). Schema:
-{"entities":[{"type":"PERSON|PLACE|TECHNOLOGY|EVENT|COMPANY","text":"exact span","chunk_id":number}]}
+# --- Claude (classic NER: CoNLL-style PER / ORG / LOC / MISC) ---
+_CLAUDE_SYSTEM = """You perform classic Named Entity Recognition on podcast transcript chunks.
+Use the standard CoNLL-2003 style taxonomy (4 types). Return ONLY valid JSON (no markdown). Schema:
+{"entities":[{"type":"PERSON|ORG|LOC|MISC","text":"exact surface span from the chunk","chunk_id":number}]}
+
+Definitions:
+- PERSON: people, including titles if part of the name span (e.g. "Dr. Smith"). No generic roles alone ("the host").
+- ORG: companies, agencies, institutions, political parties, sports teams when named as organizations.
+- LOC: locations — cities, countries, mountains, rivers, named venues/regions, addresses. Include the Amazon River here, not under ORG.
+- MISC: miscellaneous named entities that are not PERSON/ORG/LOC: languages, nationalities/ethnic groups, events, laws, works of art,
+  religions, named products/technologies when they are not clearly an ORG (e.g. "Python" the language → MISC), wars, holidays.
+
 Rules:
-- type must be one of: PERSON, PLACE, TECHNOLOGY, EVENT, COMPANY
-- PLACE: locations, cities, countries, venues
-- TECHNOLOGY: products, platforms, languages, frameworks, technical terms (e.g. Python, Kubernetes)
-- EVENT: conferences, wars, named historical events, sports finals
-- COMPANY: organizations, brands that are companies
-- Disambiguate homonyms using the chunk: e.g. "Apple" + iPhone/Mac/Cupertino → COMPANY (Apple Inc.), not the fruit.
-  "Apple" + pie/juice/orchard/fruit context → omit or do not tag as a tech company.
-  Same idea for Amazon (company vs river), Oracle (software vs myth), Meta (holding company vs generic "meta").
-- Omit filler (um, uh, like, you know), generic words, and non-entities
-- Do not duplicate the same text+type within one chunk
+- type must be exactly one of: PERSON, ORG, LOC, MISC
+- Copy "text" as the verbatim substring from that chunk (for alignment). One row per distinct span; do not duplicate the same span+type in a chunk.
+- Use chunk wording to disambiguate homonyms: "Apple" + iPhone/Mac/Cupertino → ORG; "apple" + pie/orchard/fruit → omit as a company.
+  "Amazon" + AWS/Prime/Bezos → ORG; Amazon as the river/rainforest → LOC. "Oracle" software company → ORG; Greek oracle/myth → MISC.
+  "Meta" + Facebook/Instagram → ORG.
+- Omit filler (um, uh), pronouns, generic words, and non-entity mentions
 """
+
+# Map classic NER labels (and common aliases) to our app types (ORG→COMPANY, LOC→PLACE).
+_CLASSIC_NER_ALIASES: dict[str, str] = {
+    "PER": "PERSON",
+    "PERSON": "PERSON",
+    "ORG": "ORG",
+    "ORGANIZATION": "ORG",
+    "LOC": "LOC",
+    "LOCATION": "LOC",
+    "GPE": "LOC",
+    "FAC": "LOC",
+    "MISC": "MISC",
+    "MISCELLANEOUS": "MISC",
+}
+
+_CLASSIC_NER_TO_APP: dict[str, str] = {
+    "PERSON": "PERSON",
+    "ORG": "COMPANY",
+    "LOC": "PLACE",
+    "MISC": "MISC",
+}
+
+
+def _normalize_claude_ner_type(raw: str) -> str | None:
+    """Accept classic CoNLL-style labels or legacy app labels; return ENTITY_TYPES member or None."""
+    t = str(raw or "").strip().upper()
+    if not t:
+        return None
+    if t in ENTITY_TYPES:
+        return t
+    bucket = _CLASSIC_NER_ALIASES.get(t)
+    if bucket and bucket in _CLASSIC_NER_TO_APP:
+        return _CLASSIC_NER_TO_APP[bucket]
+    return None
 
 
 def extract_with_claude(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     import anthropic
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    load_dotenv(_ENTITY_ENV_ROOT / ".env", encoding="utf-8-sig")
+    api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set for Claude entity extraction")
+        env_file = _ENTITY_ENV_ROOT / ".env"
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set for Claude entity extraction. "
+            f"Set ANTHROPIC_API_KEY in {env_file} (no quotes) and restart the API server."
+        )
 
-    model = os.environ.get("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
     client = anthropic.Anthropic(api_key=api_key)
 
     # Batch chunks to control tokens (~15 per call)
@@ -359,8 +428,9 @@ def extract_with_claude(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in ents:
             if not isinstance(item, dict):
                 continue
-            typ = str(item.get("type", "")).upper()
-            if typ not in ENTITY_TYPES:
+            raw_label = str(item.get("type", "")).strip().upper()
+            typ = _normalize_claude_ner_type(raw_label)
+            if not typ:
                 continue
             text = _clean_entity_text(str(item.get("text", "")))
             if not text:
@@ -384,16 +454,17 @@ def extract_with_claude(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 es, ee = _entity_time_span(
                     float(ch["start"]), float(ch["end"]), cleaned, idx, idx + len(text)
                 )
-            all_entities.append(
-                {
-                    "type": typ,
-                    "text": text,
-                    "start_sec": round(es, 3),
-                    "end_sec": round(ee, 3),
-                    "chunk_id": cid,
-                    "source": "claude",
-                }
-            )
+            row: dict[str, Any] = {
+                "type": typ,
+                "text": text,
+                "start_sec": round(es, 3),
+                "end_sec": round(ee, 3),
+                "chunk_id": cid,
+                "source": "claude",
+            }
+            if raw_label and raw_label != typ:
+                row["original_label"] = raw_label
+            all_entities.append(row)
 
     return all_entities
 
@@ -406,9 +477,7 @@ def run_extraction(
     Returns (chunks_with_cleaned_text, entities).
     Each chunk dict should have id, start, end, text.
     """
-    b = (backend or os.environ.get("ENTITY_BACKEND", "spacy")).lower()
-    if b not in ("spacy", "claude"):
-        b = "spacy"
+    b = resolve_entity_backend(backend)
 
     normalized: list[dict[str, Any]] = []
     for i, ch in enumerate(chunks):

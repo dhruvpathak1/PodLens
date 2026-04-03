@@ -12,7 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_PROJECT_ROOT / ".env")
+load_dotenv(_PROJECT_ROOT / ".env", encoding="utf-8-sig")
 
 # Keep model weights out of ~/.cache — macOS / sandbox often returns "Operation not permitted"
 # for that path. Must run before `import whisper` (which imports torch).
@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from enrichment import enrich_entities_payload
-from entity_pipeline import build_document, run_extraction, save_document
+from entity_pipeline import build_document, resolve_entity_backend, run_extraction, save_document
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -174,9 +174,7 @@ async def transcribe(
         entity_saved_path: str | None = None
         entity_error: str | None = None
         if extract_entities and segments:
-            backend = (entity_backend or os.environ.get("ENTITY_BACKEND", "spacy")).lower()
-            if backend not in ("spacy", "claude"):
-                backend = "spacy"
+            backend = resolve_entity_backend(entity_backend)
             chunks_dict = [
                 {"id": s["id"], "start": s["start"], "end": s["end"], "text": s["text"]} for s in segments
             ]
@@ -222,9 +220,7 @@ async def extract_entities(body: ExtractEntitiesRequest):
     if not body.chunks:
         raise HTTPException(status_code=400, detail="chunks must be non-empty")
 
-    backend = (body.backend or os.environ.get("ENTITY_BACKEND", "spacy")).lower()
-    if backend not in ("spacy", "claude"):
-        backend = "spacy"
+    backend = resolve_entity_backend(body.backend)
 
     chunks_dict = [c.model_dump() for c in body.chunks]
     try:
@@ -267,6 +263,6 @@ def health():
     return {
         "ok": True,
         "model": MODEL_NAME,
-        "entity_backend": os.environ.get("ENTITY_BACKEND", "spacy"),
+        "entity_backend": resolve_entity_backend(None),
         "unsplash_configured": uk,
     }
