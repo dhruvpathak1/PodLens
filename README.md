@@ -69,10 +69,10 @@ cd ..
 ## Configuration
 
 1. Copy the `.env.example` file to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-2. Open `.env` and fill in your API keys:
+```bash
+cp .env.example .env
+```
+3. Open `.env` and fill in your API keys:
    - `UNSPLASH_ACCESS_KEY`: Get one from [Unsplash Developers](https://unsplash.com/developers).
    - `ANTHROPIC_API_KEY`: (Optional) If you want to use Claude for entity extraction.
    - `NOMINATIM_USER_AGENT`: Set this to your app name or email
