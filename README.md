@@ -18,6 +18,28 @@ https://github.com/user-attachments/assets/d97e2ba6-fbba-426e-b249-aaa80cc6fb22
 
 - **Interactive UI:** A modern React interface to view transcripts alongside their enriched context "cards".
 
+## System Architecture
+
+![PodLens Architecture](public/architecture_diagram.png)
+
+## Work Flow
+
+1. **Audio Upload**: The user uploads an audio file (MP3, WAV, M4A, etc.) through the React-based frontend.
+2. **FastAPI Processing**: The frontend sends the audio file to the `/api/transcribe` endpoint on the FastAPI backend.
+3. **Whisper Transcription**: The backend uses OpenAI's Whisper model (running locally) to generate a full transcript with precise timestamps for each segment.
+4. **Entity Extraction**:
+   - The transcript text is cleaned of filler words (like "um", "uh", "you know").
+   - PodLens identifies key entities: **People, Companies, Locations, Technologies, Events, and more**.
+   - Extraction is performed by either **spaCy** (fast, local) or **Anthropic's Claude** (high-accuracy NER) based on configuration.
+5. **Context Enrichment**:
+   - For every extracted entity, PodLens queries external APIs in parallel:
+     - **Wikipedia API**: Fetches a concise summary and a thumbnail image.
+     - **Nominatim (OpenStreetMap)**: If it's a location, it retrieves coordinates and generates an interactive map embed URL.
+     - **Unsplash API**: Searches for a high-quality relevant photograph to visualize the topic.
+6. **Data Persistence**:
+   - The final transcript is saved as a `.txt` file in the `server/transcripts/` directory.
+   - The enriched entity data, including all metadata and API links, is exported as a `.json` file in `server/entity_exports/`.
+7. **Interactive Display**: The React frontend receives the processed JSON and renders the transcript. Enriched "Context Cards" appear dynamically, allowing users to click and explore maps, images, and summaries related to what is being said.
 
 ## APIs & Technology Stack
 
