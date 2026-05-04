@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { extractWebmInitPrefix } from './webmInitPrefix'
 
 /** Wall-clock aligned windows sent to the transcription API (matches MediaRecorder timeslice). */
-export const LIVE_CHUNK_INTERVAL_MS = 20_000
+export const LIVE_CHUNK_INTERVAL_MS = 10_000
 
 type Options = {
   onChunk: (blob: Blob, chunkIndex: number) => void | Promise<void>
@@ -16,6 +17,8 @@ export function useLiveMicRecorder({ onChunk }: Options) {
   const streamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunkIndexRef = useRef(0)
+  /** EBML/Segment/Tracks prefix from first slice; prepended to later slices so ffmpeg can decode each blob. */
+  const webmInitPrefixRef = useRef<Uint8Array | null>(null)
   const onChunkRef = useRef(onChunk)
 
   useEffect(() => {
@@ -43,6 +46,7 @@ export function useLiveMicRecorder({ onChunk }: Options) {
   const start = useCallback(async () => {
     setMicError(null)
     chunkIndexRef.current = 0
+    webmInitPrefixRef.current = null
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
@@ -64,9 +68,35 @@ export function useLiveMicRecorder({ onChunk }: Options) {
       recorderRef.current = rec
 
       rec.ondataavailable = (ev) => {
-        if (ev.data.size < 512) return
+        // Do not drop small blobs: short WebM fragments after each timeslice can be <512 bytes
+        // and skipping them breaks chunk indexing and the processing chain.
+        if (ev.data.size === 0) return
         const idx = chunkIndexRef.current++
-        void Promise.resolve(onChunkRef.current(ev.data, idx)).catch(() => {})
+        void (async () => {
+          try {
+            const ab = await ev.data.arrayBuffer()
+            const u8 = new Uint8Array(ab)
+            let payload: Blob
+            if (idx === 0) {
+              webmInitPrefixRef.current = extractWebmInitPrefix(u8)
+              if (!webmInitPrefixRef.current?.length) {
+                console.warn(
+                  '[PodLens live] Could not derive WebM init prefix from first slice; later slices may decode as Unknown.'
+                )
+              }
+              payload = new Blob([u8 as BlobPart], { type: mimeType })
+            } else {
+              const pre = webmInitPrefixRef.current
+              payload =
+                pre && pre.length > 0
+                  ? new Blob([pre as BlobPart, u8 as BlobPart], { type: mimeType })
+                  : new Blob([u8 as BlobPart], { type: mimeType })
+            }
+            await Promise.resolve(onChunkRef.current(payload, idx))
+          } catch (err) {
+            console.warn('[PodLens live] onChunk handler error', err)
+          }
+        })()
       }
 
       rec.onstop = () => {

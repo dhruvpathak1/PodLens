@@ -4,10 +4,13 @@ import { MiniAudioPlayer, type MiniAudioPlayerHandle } from './components/MiniAu
 import {
   transcribeAudio,
   transcribeLiveAudioChunk,
+  type TranscribeResult,
   type TranscriptSegment,
 } from './lib/transcribeAudio'
 import { LIVE_CHUNK_INTERVAL_MS, useLiveMicRecorder } from './lib/useLiveMicRecorder'
+import { LIVE_TRANSCRIBE_MAX_CONCURRENT, createOrderedLiveChunkPipeline } from './lib/liveChunkPipeline'
 import { mergeEntityDocuments, mergeTranscriptSegments } from './lib/liveSessionMerge'
+import { UNKNOWN_TRANSCRIPT_SENTENCE, unknownLiveTranscriptSegments } from './lib/unknownTranscript'
 import { EntitySourceCard } from './components/EntitySourceCard'
 import { enrichEntityCards, type EnrichedEntityCard } from './lib/enrichEntities'
 import type { EntityDocument, EntityRecord } from './lib/extractEntities'
@@ -103,7 +106,10 @@ export default function App() {
   const prevActivePlayIdRef = useRef<string | null>(null)
   const prevLiveActiveKeysRef = useRef<Set<string>>(new Set())
   const sessionStartMsRef = useRef<number | null>(null)
-  const chunkChainRef = useRef(Promise.resolve())
+  const applyLiveChunkRef = useRef<(chunkIndex: number, res: TranscribeResult) => Promise<void>>(
+    async () => {}
+  )
+  const onLiveFailRef = useRef<(chunkIndex: number, err: unknown) => Promise<void>>(async () => {})
   const [sessionMode, setSessionMode] = useState<SessionMode>('file')
   const [liveProcessing, setLiveProcessing] = useState(false)
   const [liveChunkError, setLiveChunkError] = useState<string | null>(null)
@@ -123,75 +129,37 @@ export default function App() {
   const entityBackendOption =
     viteEntityBackend === 'spacy' || viteEntityBackend === 'claude' ? viteEntityBackend : undefined
 
+  const entityBackendOptionRef = useRef(entityBackendOption)
+  entityBackendOptionRef.current = entityBackendOption
+
+  const livePipeline = useMemo(
+    () =>
+      createOrderedLiveChunkPipeline({
+        maxConcurrent: LIVE_TRANSCRIBE_MAX_CONCURRENT,
+        transcribe: (blob, chunkIndex) =>
+          transcribeLiveAudioChunk(blob, {
+            chunkSeq: chunkIndex,
+            timeOffsetSec: chunkIndex * (LIVE_CHUNK_INTERVAL_MS / 1000),
+            backend: entityBackendOptionRef.current,
+          }),
+        apply: (chunkIndex, res) => applyLiveChunkRef.current(chunkIndex, res),
+        onTranscribeFailure: (chunkIndex, err) => onLiveFailRef.current(chunkIndex, err),
+        setBusy: setLiveProcessing,
+      }),
+    []
+  )
+
   const queueLiveChunk = useCallback(
     (blob: Blob, chunkIndex: number) => {
-      chunkChainRef.current = chunkChainRef.current.then(async () => {
-        setLiveProcessing(true)
-        setLiveChunkError(null)
-        try {
-          const secPerChunk = LIVE_CHUNK_INTERVAL_MS / 1000
-          const res = await transcribeLiveAudioChunk(blob, {
-            chunkSeq: chunkIndex,
-            timeOffsetSec: chunkIndex * secPerChunk,
-            backend: entityBackendOption,
-          })
-
-          const piece = res.transcript.trim()
-          if (piece) {
-            setTranscript((prev) => (prev ? `${prev} ${piece}`.trim() : piece))
-          }
-          if (res.segments.length) {
-            setSegments((prev) => mergeTranscriptSegments(prev, res.segments))
-          }
-          const mergedDoc = res.document ?? null
-          if (mergedDoc) {
-            setEntityDoc((prev) => mergeEntityDocuments(prev, mergedDoc))
-          }
-          if (res.entityError) {
-            setEntityError(res.entityError)
-          }
-
-          const doc = mergedDoc
-          if (doc?.entities?.length) {
-            const keys = new Set(enrichedCardsRef.current.map((c) => entityMatchKey(c.type, c.text)))
-            const novelRaw = doc.entities.filter((e) => !keys.has(entityMatchKey(e.type, e.text)))
-            const seenLocal = new Set<string>()
-            const novelUnique = novelRaw.filter((e) => {
-              const k = entityMatchKey(e.type, e.text)
-              if (seenLocal.has(k)) return false
-              seenLocal.add(k)
-              return true
-            })
-            if (novelUnique.length) {
-              try {
-                const r = await enrichEntityCards(novelUnique)
-                setEnrichedCards((p) => {
-                  const k = new Set(p.map((c) => entityMatchKey(c.type, c.text)))
-                  const add = r.cards.filter((c) => !k.has(entityMatchKey(c.type, c.text)))
-                  const next = [...p, ...add]
-                  enrichedCardsRef.current = next
-                  return next
-                })
-                setUnsplashHint((u) => u ?? r.unsplash_enabled ?? null)
-              } catch (e) {
-                setEnrichError(e instanceof Error ? e.message : 'Enrichment failed')
-              }
-            }
-          }
-        } catch (e) {
-          setLiveChunkError(e instanceof Error ? e.message : 'Live transcription failed')
-        } finally {
-          setLiveProcessing(false)
-        }
-      })
+      livePipeline.submit(blob, chunkIndex)
     },
-    [entityBackendOption]
+    [livePipeline]
   )
 
   const liveMic = useLiveMicRecorder({ onChunk: queueLiveChunk })
 
   const handleStartLiveSession = useCallback(() => {
-    chunkChainRef.current = Promise.resolve()
+    livePipeline.reset()
     sessionStartMsRef.current = Date.now()
     setSessionMode('live')
     liveMic.clearMicError()
@@ -214,8 +182,10 @@ export default function App() {
     prevLiveActiveKeysRef.current = new Set()
     setPlaybackTime(0)
     setPlaybackDuration(0)
+    setSearchOpen(false)
+    setSearchQuery('')
     void liveMic.start()
-  }, [liveMic])
+  }, [liveMic, livePipeline])
 
   const handleStopLiveSession = useCallback(() => {
     const start = sessionStartMsRef.current
@@ -426,7 +396,9 @@ export default function App() {
           ? 'Fetching sources…'
           : transcript
             ? 'Synced'
-            : 'Ready'
+            : sessionMode === 'live' && (entityDoc?.entities?.length || liveListening)
+              ? 'Live · context'
+              : 'Ready'
   const hasTimedSentences = allSentences.some((s) => s.start > 0 || s.end > 0)
 
   const activePlaySentenceId = useMemo(() => {
@@ -487,6 +459,74 @@ export default function App() {
     },
     [selectSentence]
   )
+
+  applyLiveChunkRef.current = async (chunkIndex: number, res: TranscribeResult) => {
+    setLiveChunkError(null)
+    const secPerChunk = LIVE_CHUNK_INTERVAL_MS / 1000
+    const piece = res.transcript.trim()
+    if (piece) {
+      setTranscript((prev) => (prev ? `${prev} ${piece}`.trim() : piece))
+    } else if (!res.segments.length) {
+      setTranscript((prev) =>
+        prev ? `${prev} ${UNKNOWN_TRANSCRIPT_SENTENCE}`.trim() : UNKNOWN_TRANSCRIPT_SENTENCE
+      )
+    }
+    if (res.segments.length) {
+      setSegments((prev) => mergeTranscriptSegments(prev, res.segments))
+    } else {
+      setSegments((prev) =>
+        mergeTranscriptSegments(prev, unknownLiveTranscriptSegments(chunkIndex, secPerChunk))
+      )
+    }
+    const mergedDoc = res.document ?? null
+    if (mergedDoc) {
+      setEntityDoc((prev) => mergeEntityDocuments(prev, mergedDoc))
+    }
+    if (res.entityError) {
+      setEntityError(res.entityError)
+    }
+    const doc = mergedDoc
+    if (doc?.entities?.length) {
+      const keys = new Set(enrichedCardsRef.current.map((c) => entityMatchKey(c.type, c.text)))
+      const novelRaw = doc.entities.filter((e) => !keys.has(entityMatchKey(e.type, e.text)))
+      const seenLocal = new Set<string>()
+      const novelUnique = novelRaw.filter((e) => {
+        const k = entityMatchKey(e.type, e.text)
+        if (seenLocal.has(k)) return false
+        seenLocal.add(k)
+        return true
+      })
+      if (novelUnique.length) {
+        try {
+          const r = await enrichEntityCards(novelUnique)
+          // Update ref synchronously before returning from apply — the next live chunk's apply can run
+          // in the same macrotask/microtask chain before React flushes setEnrichedCards, so a ref only
+          // maintained inside a setState updater was stale and skipped enrichment for later chunks.
+          const prevCards = enrichedCardsRef.current
+          const dedupeKey = (c: EnrichedEntityCard) => entityMatchKey(c.type, c.text)
+          const existingKeys = new Set(prevCards.map(dedupeKey))
+          const add = r.cards.filter((c) => !existingKeys.has(dedupeKey(c)))
+          const next = [...prevCards, ...add]
+          enrichedCardsRef.current = next
+          setEnrichedCards(next)
+          setUnsplashHint((u) => u ?? r.unsplash_enabled ?? null)
+        } catch (e) {
+          setEnrichError(e instanceof Error ? e.message : 'Enrichment failed')
+        }
+      }
+    }
+  }
+
+  onLiveFailRef.current = async (chunkIndex: number, err: unknown) => {
+    setLiveChunkError(err instanceof Error ? err.message : 'Live transcription failed')
+    const secPerChunk = LIVE_CHUNK_INTERVAL_MS / 1000
+    setTranscript((prev) =>
+      prev ? `${prev} ${UNKNOWN_TRANSCRIPT_SENTENCE}`.trim() : UNKNOWN_TRANSCRIPT_SENTENCE
+    )
+    setSegments((prev) =>
+      mergeTranscriptSegments(prev, unknownLiveTranscriptSegments(chunkIndex, secPerChunk))
+    )
+  }
 
   return (
     <div className="dashboard">
@@ -551,8 +591,9 @@ export default function App() {
 
             <div className="transcript-sidebar__live" aria-label="Live microphone session">
               <p className="transcript-sidebar__live-lead">
-                Capture from your microphone: each {LIVE_CHUNK_INTERVAL_MS / 1000}-second slice is sent to the API for
-                Whisper transcription, tagging, and enrichment — same pipeline as uploaded audio.
+                Every {LIVE_CHUNK_INTERVAL_MS / 1000}s the mic captures audio; up to {LIVE_TRANSCRIBE_MAX_CONCURRENT}{' '}
+                slices can transcribe in parallel while the recorder already buffers the next window. Transcript and NER
+                context are merged in time order.
               </p>
               {!liveMic.active ? (
                 <button
@@ -663,8 +704,8 @@ export default function App() {
 
             {!busy && !transcript && !error && (
               <p className="transcript-sidebar__empty">
-                Run <strong>PodLens</strong> on a file, or <strong>Start live listening</strong> for microphone capture
-                every {LIVE_CHUNK_INTERVAL_MS / 1000}s.
+                Run <strong>PodLens</strong> on a file, or <strong>Start live listening</strong> for rolling transcript
+                and context every {LIVE_CHUNK_INTERVAL_MS / 1000}s.
               </p>
             )}
 
@@ -720,7 +761,7 @@ export default function App() {
                       {sessionMode === 'live' && !audioUrl
                         ? liveListening
                           ? `Listening — the timeline follows recording time; source cards appear when tagged mentions fall on that timeline (updates every ${LIVE_CHUNK_INTERVAL_MS / 1000}s).`
-                          : 'Stopped — scrub the transcript on the left or start listening again; cards appear when mentions align with the frozen timeline.'
+                          : 'Stopped — start listening again or load a file; cards appear when mentions align with the frozen timeline.'
                         : `Play the audio — full cards appear when a tagged mention begins. Up to ${LIVE_QUEUE_MAX} stay on screen; older ones roll off automatically.`}
                     </p>
                   ) : (

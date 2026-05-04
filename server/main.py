@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +36,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = os.environ.get("WHISPER_MODEL", "base")
+UNKNOWN_TRANSCRIPT_SENTENCE = "Unknown Sentence"
+LIVE_CHUNK_WINDOW_SEC = float(os.environ.get("LIVE_CHUNK_WINDOW_SEC", "10"))
 TRANSCRIPTS_DIR = Path(
     os.environ.get("TRANSCRIPTS_DIR", str(Path(__file__).resolve().parent / "transcripts"))
 )
@@ -116,6 +120,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -132,15 +138,75 @@ def get_model():
     return _model
 
 
+def _ffmpeg_binary() -> str:
+    return (os.environ.get("FFMPEG_PATH") or "").strip() or shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _ffmpeg_normalize_for_whisper(src_path: str) -> str:
+    """
+    Decode arbitrary browser / container input to mono 16 kHz PCM WAV.
+
+    Whisper's built-in ``load_audio`` pipes ffmpeg stdout; fragmented WebM from
+    MediaRecorder often fails that path. A two-step file decode is more reliable.
+    """
+    fd, wav_path = tempfile.mkstemp(suffix=".whisper16k.wav")
+    os.close(fd)
+    ffmpeg = _ffmpeg_binary()
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-y",
+        "-nostdin",
+        "-threads",
+        "0",
+        "-fflags",
+        "+genpts+discardcorrupt",
+        "-err_detect",
+        "ignore_err",
+        "-i",
+        src_path,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-acodec",
+        "pcm_s16le",
+        "-f",
+        "wav",
+        wav_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        err = (r.stderr or b"").decode(errors="replace").strip()
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+        tail = err[-3500:] if err else "(no stderr)"
+        raise RuntimeError(f"ffmpeg could not decode audio (exit {r.returncode}): {tail}") from None
+    return wav_path
+
+
 def _whisper_transcribe_file(tmp_path: str, language: str | None) -> tuple[str, list[dict]]:
-    model = get_model()
-    opts: dict = {}
-    if language and language.strip():
-        opts["language"] = language.strip()
-    result = model.transcribe(tmp_path, **opts)
-    text = (result.get("text") or "").strip()
-    segments = _segments_from_result(result)
-    return text, segments
+    decoded = _ffmpeg_normalize_for_whisper(tmp_path)
+    try:
+        model = get_model()
+        opts: dict = {}
+        if language and language.strip():
+            opts["language"] = language.strip()
+        result = model.transcribe(decoded, **opts)
+        text = (result.get("text") or "").strip()
+        segments = _segments_from_result(result)
+        return text, segments
+    finally:
+        if decoded != tmp_path:
+            try:
+                os.unlink(decoded)
+            except OSError:
+                pass
 
 
 def _offset_segment_ids_and_times(segments: list[dict], *, time_offset_sec: float, chunk_seq: int) -> list[dict]:
@@ -183,7 +249,16 @@ async def transcribe(
             tmp_path = tmp.name
             tmp.write(contents)
 
-        text, segments = _whisper_transcribe_file(tmp_path, language)
+        decode_placeholder = False
+        try:
+            text, segments = _whisper_transcribe_file(tmp_path, language)
+        except Exception as e:
+            logger.warning("transcribe/decode failed; using %r: %s", UNKNOWN_TRANSCRIPT_SENTENCE, e)
+            text = UNKNOWN_TRANSCRIPT_SENTENCE
+            segments = [
+                {"id": 0, "start": 0.0, "end": 1.0, "text": UNKNOWN_TRANSCRIPT_SENTENCE},
+            ]
+            decode_placeholder = True
 
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -194,7 +269,7 @@ async def transcribe(
         document: dict | None = None
         entity_saved_path: str | None = None
         entity_error: str | None = None
-        if extract_entities and segments:
+        if extract_entities and segments and not decode_placeholder:
             backend = resolve_entity_backend(entity_backend)
             chunks_dict = [
                 {"id": s["id"], "start": s["start"], "end": s["end"], "text": s["text"]} for s in segments
@@ -246,7 +321,7 @@ async def transcribe_chunk(
     entity_backend: str | None = Form(None),
     persist_transcript: bool = Form(False),
 ):
-    """Transcribe one timed slice (e.g. 20s of live mic). Times are shifted into a session timeline."""
+    """Transcribe one timed slice (e.g. 10s of live mic). Times are shifted into a session timeline."""
     if not audio.filename:
         raise HTTPException(status_code=400, detail="Missing file name")
 
@@ -263,10 +338,32 @@ async def transcribe_chunk(
             tmp_path = tmp.name
             tmp.write(contents)
 
-        text, raw_segments = _whisper_transcribe_file(tmp_path, language)
-        segments = _offset_segment_ids_and_times(
-            raw_segments, time_offset_sec=time_offset_sec, chunk_seq=chunk_seq
-        )
+        decode_placeholder = False
+        try:
+            text, raw_segments = _whisper_transcribe_file(tmp_path, language)
+            segments = _offset_segment_ids_and_times(
+                raw_segments, time_offset_sec=time_offset_sec, chunk_seq=chunk_seq
+            )
+        except Exception as e:
+            logger.warning(
+                "transcribe-chunk %s decode/transcribe failed; using %r: %s",
+                int(chunk_seq),
+                UNKNOWN_TRANSCRIPT_SENTENCE,
+                e,
+            )
+            text = UNKNOWN_TRANSCRIPT_SENTENCE
+            raw_placeholder = [
+                {
+                    "id": 0,
+                    "start": 0.0,
+                    "end": LIVE_CHUNK_WINDOW_SEC,
+                    "text": UNKNOWN_TRANSCRIPT_SENTENCE,
+                }
+            ]
+            segments = _offset_segment_ids_and_times(
+                raw_placeholder, time_offset_sec=time_offset_sec, chunk_seq=chunk_seq
+            )
+            decode_placeholder = True
 
         saved_path: str | None = None
         if persist_transcript and segments:
@@ -281,7 +378,7 @@ async def transcribe_chunk(
         document: dict | None = None
         entity_saved_path: str | None = None
         entity_error: str | None = None
-        if extract_entities and segments:
+        if extract_entities and segments and not decode_placeholder:
             backend = resolve_entity_backend(entity_backend)
             chunks_dict = [
                 {"id": s["id"], "start": s["start"], "end": s["end"], "text": s["text"]} for s in segments
@@ -313,6 +410,7 @@ async def transcribe_chunk(
             "entity_error": entity_error,
             "chunk_seq": int(chunk_seq),
             "time_offset_sec": float(time_offset_sec),
+            "decode_placeholder": decode_placeholder,
         }
     except HTTPException:
         raise
