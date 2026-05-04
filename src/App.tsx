@@ -499,13 +499,16 @@ export default function App() {
       if (novelUnique.length) {
         try {
           const r = await enrichEntityCards(novelUnique)
-          setEnrichedCards((p) => {
-            const k = new Set(p.map((c) => entityMatchKey(c.type, c.text)))
-            const add = r.cards.filter((c) => !k.has(entityMatchKey(c.type, c.text)))
-            const next = [...p, ...add]
-            enrichedCardsRef.current = next
-            return next
-          })
+          // Update ref synchronously before returning from apply — the next live chunk's apply can run
+          // in the same macrotask/microtask chain before React flushes setEnrichedCards, so a ref only
+          // maintained inside a setState updater was stale and skipped enrichment for later chunks.
+          const prevCards = enrichedCardsRef.current
+          const dedupeKey = (c: EnrichedEntityCard) => entityMatchKey(c.type, c.text)
+          const existingKeys = new Set(prevCards.map(dedupeKey))
+          const add = r.cards.filter((c) => !existingKeys.has(dedupeKey(c)))
+          const next = [...prevCards, ...add]
+          enrichedCardsRef.current = next
+          setEnrichedCards(next)
           setUnsplashHint((u) => u ?? r.unsplash_enabled ?? null)
         } catch (e) {
           setEnrichError(e instanceof Error ? e.message : 'Enrichment failed')

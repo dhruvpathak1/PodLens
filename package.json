@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k -n web,api -c cyan,magenta \"vite\" \"npm run dev:api\"",
     "dev:web": "vite",
-    "dev:api": "cd server && ../venv/bin/python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000",
+    "dev:api": "cd server && ../venv/bin/python -m uvicorn main:app --reload --host 127.0.0.1 --port ${API_PORT:-8000}",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
