@@ -45,11 +45,16 @@ export type EnrichEntitiesResponse = {
   unsplash_enabled?: boolean
 }
 
+function viteTranscribeUrl(): string | undefined {
+  const v = import.meta.env.VITE_TRANSCRIBE_URL
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined
+}
+
 function resolveEndpoint(explicit?: string): string {
   if (explicit) return explicit.replace(/\/$/, '')
-  const base = import.meta.env.VITE_TRANSCRIBE_URL
+  const base = viteTranscribeUrl()
   if (!base) return DEFAULT_URL
-  const root = String(base).replace(/\/$/, '').replace(/\/api\/transcribe$/i, '')
+  const root = base.replace(/\/$/, '').replace(/\/api\/transcribe$/i, '')
   return `${root}/api/enrich-entities`
 }
 

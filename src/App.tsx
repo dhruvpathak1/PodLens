@@ -24,6 +24,10 @@ import './App.css'
 
 const PODLENS_TITLE = 'PodLens'
 
+const missingProdTranscribeUrl =
+  import.meta.env.PROD &&
+  !(typeof import.meta.env.VITE_TRANSCRIBE_URL === 'string' && import.meta.env.VITE_TRANSCRIBE_URL.trim())
+
 type JobState = 'idle' | 'transcribing' | 'enriching'
 type SessionMode = 'file' | 'live'
 
@@ -530,6 +534,15 @@ export default function App() {
 
   return (
     <div className="dashboard">
+      {missingProdTranscribeUrl && (
+        <div className="dashboard__deploy-hint alert alert--error" role="status">
+          This build has no <code className="app-inline-code">VITE_TRANSCRIBE_URL</code>. Add the GitHub Actions
+          secret <code className="app-inline-code">VITE_TRANSCRIBE_URL</code> pointing at your API (for example{' '}
+          <code className="app-inline-code">https://your-host/api/transcribe</code>), rebuild, and set{' '}
+          <code className="app-inline-code">CORS_EXTRA_ORIGINS</code> on the server to this site&apos;s origin (for
+          example <code className="app-inline-code">https://your-username.github.io</code>).
+        </div>
+      )}
       <div className="dashboard__grid">
         <aside className="transcript-sidebar" aria-label="Live transcript">
           <div className="transcript-sidebar__head">

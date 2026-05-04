@@ -8,6 +8,12 @@
   color: var(--text);
 }
 
+.dashboard__deploy-hint {
+  flex-shrink: 0;
+  margin: 0.75rem 1rem 0;
+  max-width: 100%;
+}
+
 .dashboard__grid {
   flex: 1;
   min-height: 0;

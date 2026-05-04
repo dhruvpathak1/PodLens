@@ -2,6 +2,11 @@ import type { EntityDocument } from './extractEntities'
 
 const DEFAULT_URL = '/api/transcribe'
 
+function viteTranscribeUrl(): string | undefined {
+  const v = import.meta.env.VITE_TRANSCRIBE_URL
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined
+}
+
 export type TranscribeOptions = {
   endpoint?: string
   /** Sent as optional form field `language` if set */
@@ -29,8 +34,7 @@ export type TranscribeResult = {
 }
 
 function resolveEndpoint(explicit?: string): string {
-  const fromEnv = import.meta.env.VITE_TRANSCRIBE_URL
-  return (explicit ?? fromEnv ?? DEFAULT_URL).replace(/\/$/, '')
+  return (explicit ?? viteTranscribeUrl() ?? DEFAULT_URL).replace(/\/$/, '')
 }
 
 function pickTranscriptFromJson(data: unknown): string | null {

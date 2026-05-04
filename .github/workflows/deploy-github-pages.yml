@@ -1,0 +1,61 @@
+# Build static assets and publish to GitHub Pages (Settings → Pages → Source: GitHub Actions).
+#
+# Required repository configuration:
+# 1) Settings → Pages → Build and deployment: Source = "GitHub Actions"
+# 2) Settings → Secrets and variables → Actions → add secret:
+#    VITE_TRANSCRIBE_URL = https://<your-api-host>/api/transcribe
+#    (Your FastAPI server must allow this site's origin; set CORS_EXTRA_ORIGINS on the server,
+#     e.g. https://<github-username>.github.io )
+#
+# The workflow sets VITE_BASE_PATH to /${{ github.event.repository.name }}/ so asset URLs match
+# https://<user>.github.io/<repo>/.
+
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install and build
+        env:
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          VITE_TRANSCRIBE_URL: ${{ secrets.VITE_TRANSCRIBE_URL }}
+        run: |
+          npm ci
+          npm run build
+          # Vite may omit dotfiles from public/; Jekyll ignores are not used for Actions Pages, but this is harmless.
+          touch dist/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deploy
+        name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

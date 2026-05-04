@@ -114,15 +114,22 @@ def _transcript_file_body(text: str, segments: list[dict]) -> str:
         return "\n".join(lines) + "\n"
     return text + ("\n" if text else "")
 
-app = FastAPI(title="Whisper transcribe")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+def _cors_allow_origins() -> list[str]:
+    defaults = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
-    ],
+    ]
+    extra = os.environ.get("CORS_EXTRA_ORIGINS", "")
+    more = [o.strip() for o in extra.split(",") if o.strip()]
+    return defaults + more
+
+
+app = FastAPI(title="Whisper transcribe")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
