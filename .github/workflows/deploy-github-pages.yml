@@ -1,5 +1,9 @@
 # Build static assets and publish to GitHub Pages (Settings → Pages → Source: GitHub Actions).
 #
+# If the live site shows a blank page, check View Source: if you see src="/src/main.tsx", GitHub Pages
+# is still publishing the repo root (branch deploy) instead of this workflow's dist/ — switch Source
+# to "GitHub Actions" below and redeploy.
+#
 # Required repository configuration:
 # 1) Settings → Pages → Build and deployment: Source = "GitHub Actions"
 # 2) Settings → Secrets and variables → Actions → add secret:
@@ -49,6 +53,17 @@ jobs:
           npm run build
           # Vite may omit dotfiles from public/; Jekyll ignores are not used for Actions Pages, but this is harmless.
           touch dist/.nojekyll
+
+      - name: Verify dist is a production bundle (not repo-root index.html)
+        run: |
+          if grep -qE 'src="/src/main\.tsx"' dist/index.html; then
+            echo "::error::dist/index.html still points at Vite dev entry — build output is wrong."
+            exit 1
+          fi
+          if ! grep -qE '/assets/[^"]+\.js' dist/index.html; then
+            echo "::error::dist/index.html has no hashed /assets/*.js script — not a Vite build."
+            exit 1
+          fi
 
       - uses: actions/configure-pages@v5
 
