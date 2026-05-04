@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 /** Wall-clock aligned windows sent to the transcription API (matches MediaRecorder timeslice). */
-export const LIVE_CHUNK_INTERVAL_MS = 20_000
+export const LIVE_CHUNK_INTERVAL_MS = 10_000
 
 type Options = {
   onChunk: (blob: Blob, chunkIndex: number) => void | Promise<void>
@@ -64,9 +64,13 @@ export function useLiveMicRecorder({ onChunk }: Options) {
       recorderRef.current = rec
 
       rec.ondataavailable = (ev) => {
-        if (ev.data.size < 512) return
+        // Do not drop small blobs: short WebM fragments after each timeslice can be <512 bytes
+        // and skipping them breaks chunk indexing and the processing chain.
+        if (ev.data.size === 0) return
         const idx = chunkIndexRef.current++
-        void Promise.resolve(onChunkRef.current(ev.data, idx)).catch(() => {})
+        void Promise.resolve(onChunkRef.current(ev.data, idx)).catch((err) => {
+          console.warn('[PodLens live] onChunk handler error', err)
+        })
       }
 
       rec.onstop = () => {

@@ -139,7 +139,7 @@ function resolveChunkEndpoint(explicit?: string): string {
 }
 
 /**
- * Transcribe one live microphone slice (e.g. 20s WebM). Same response shape as {@link transcribeAudio}.
+ * Transcribe one live microphone slice (e.g. 10s WebM). Same response shape as {@link transcribeAudio}.
  */
 export async function transcribeLiveAudioChunk(
   blob: Blob,
